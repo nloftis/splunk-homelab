@@ -64,6 +64,17 @@ Splunk Web is available at `http://<NAS-IP>:8000` after startup.
 
 ## Resource notes
 
+- **Splunk Free's license caps ingestion at 500 MB/day** — exceeding it doesn't halt
+  indexing immediately, it logs a license violation warning; search is disabled only
+  after repeated violations accumulate in a rolling 30-day window (indexing continues
+  throughout). Worth sizing input sources against this ceiling before wiring up all six
+  planned sources — Suricata and Wazuh alerts (if/when enabled) are the sources most
+  likely to be volume-heavy relative to it; OPNsense/Unbound syslog and DSM system logs
+  are comparatively light. `Settings > Licensing > Usage Report` (or
+  `index=_internal source=*license_usage.log* | stats sum(b) by index`) shows actual
+  daily consumption once sources are flowing.
+- Image is pinned to `splunk/splunk:10.4.3` rather than `:latest` — see Non-obvious
+  findings below for why an unpinned tag silently broke a routine restart on this hardware.
 - `mem_limit: 3g` / `mem_reservation: 1g` set in `docker-compose.yml`, sized against a 6GB
   NAS with Wazuh's indexer stopped. Re-check DSM Resource Monitor before adjusting.
 - `cpus` (hard CPU quota) is unsupported on this DSM kernel — CFS bandwidth control isn't
@@ -104,6 +115,21 @@ Splunk Web is available at `http://<NAS-IP>:8000` after startup.
 
 ## Non-obvious findings
 
+- **`splunk/splunk:latest` is unsafe to run unpinned on this hardware.** A `docker compose
+  down`/`up` cycle — done here to pick up an unrelated port-mapping fix — triggered Splunk's
+  upgrade-migration path because the image behind `:latest` had silently become a newer
+  version (`10.4.3`) than what was recorded in the bind-mounted config, sometime after
+  initial deployment. That migration path runs its own CPU precheck requiring AVX, separate
+  from and stricter than the KV Store/MongoDB AVX requirement above — it hard-fails the
+  entire Splunk binary, not just KV Store, and crash-loops the container indefinitely.
+  Confirmed via `docker exec splunk /opt/splunk/bin/splunk version` and image label
+  inspection that `10.4.3` was already fully downloaded and cached locally before this was
+  ever noticed — the mismatch between cached image and on-disk config state was dormant and
+  invisible the entire time Splunk kept running continuously, only surfacing on restart.
+  Fixed by wiping `etc/`/`var/` for a genuinely fresh install (sidesteps the
+  upgrade-detection path entirely) and pinning `image: splunk/splunk:10.4.3` explicitly in
+  `docker-compose.yml` instead of `:latest`, so a future restart can't silently pull a
+  version this hardware can't run.
 - **KV Store cannot run on this hardware — confirmed, permanent limitation, not a
   misconfiguration.** Splunk Web showed `KV Store process terminated abnormally (exit code
   4, status PID ... killed by signal 4: Illegal instruction)` shortly after first boot.
@@ -115,7 +141,6 @@ Splunk Web is available at `http://<NAS-IP>:8000` after startup.
   is KV Store-backed app config storage, Distributed Configuration Management, and parts of
   the Monitoring Console. Worth knowing for anyone running Splunk on similar low-power
   Celeron J-series NAS hardware.
-
 - **The official Splunk Docker image runs a full Ansible playbook on every container
   start**, not a thin shell entrypoint. First boot works through roles like `splunk_common`
   and `splunk_standalone` — gathering facts, detecting cluster config, setting directory
