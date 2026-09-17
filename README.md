@@ -104,6 +104,18 @@ Splunk Web is available at `http://<NAS-IP>:8000` after startup.
 
 ## Non-obvious findings
 
+- **KV Store cannot run on this hardware — confirmed, permanent limitation, not a
+  misconfiguration.** Splunk Web showed `KV Store process terminated abnormally (exit code
+  4, status PID ... killed by signal 4: Illegal instruction)` shortly after first boot.
+  Splunk's KV Store is backed by MongoDB internally, and modern `mongod` builds require the
+  AVX CPU instruction set to run at all — crashing with `SIGILL` if it's absent. Confirmed
+  via `cat /proc/cpuinfo | grep avx` on the DS224+: no AVX flag present anywhere in the
+  Celeron J4125's (Gemini Lake) flag set. No fix exists short of different hardware. Core
+  functionality (indexing, search, HEC ingestion) doesn't depend on KV Store; what's lost
+  is KV Store-backed app config storage, Distributed Configuration Management, and parts of
+  the Monitoring Console. Worth knowing for anyone running Splunk on similar low-power
+  Celeron J-series NAS hardware.
+
 - **The official Splunk Docker image runs a full Ansible playbook on every container
   start**, not a thin shell entrypoint. First boot works through roles like `splunk_common`
   and `splunk_standalone` — gathering facts, detecting cluster config, setting directory
