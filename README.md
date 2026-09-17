@@ -82,6 +82,26 @@ Splunk Web is available at `http://<NAS-IP>:8000` after startup.
   succeed.
 - Toggle procedure: stop Wazuh's indexer container before bringing Splunk up, or vice versa.
 
+## Security considerations
+
+- **"Everyone: Read & Write" ACL on the `docker` share's `splunk/etc` and `splunk/var`
+  directories** (see Resource notes above) is a broader grant than ideal. "Everyone" in
+  DSM's ACL model means every account defined on this NAS, not the public internet — the
+  share isn't internet-exposed — but within that boundary, any DSM account with access to
+  the `docker` share can write into `etc/apps/`, which Splunk's Ansible provisioning
+  executes on start. That's a real path to code execution inside the container, not just
+  config tampering, for a single-admin homelab where the practical risk is low but not zero.
+- **Root-cause fix considered and rejected**: Splunk's Docker image supports `SPLUNK_USER`/
+  `SPLUNK_GROUP` env vars to override which account its processes run as (default: the
+  built-in `splunk` user, UID/GID `41812`), which in theory could map the container to a
+  real DSM identity and let the ACL grant be narrowed back down. Rejected after checking
+  Splunk's own docs and a documented GitHub issue: these variables are built around three
+  specific sanctioned accounts (`splunk`, `ansible`, `root`), not arbitrary host UIDs.
+  Pointing them at a DSM UID like `synadmin`'s (1026) is unsupported territory, with a real
+  precedent of it breaking the container's internal auth/config generation (corrupted
+  `passwd` file, failed HEC setup) even when overriding to one of the three sanctioned
+  accounts. Left as a known, documented tradeoff rather than "fixed."
+
 ## Non-obvious findings
 
 - **The official Splunk Docker image runs a full Ansible playbook on every container
