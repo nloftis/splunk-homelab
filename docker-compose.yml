@@ -1,0 +1,38 @@
+services:
+  splunk:
+    image: splunk/splunk:latest
+    container_name: splunk
+    hostname: splunk
+    restart: unless-stopped
+    environment:
+      SPLUNK_START_ARGS: --accept-license
+      SPLUNK_GENERAL_TERMS: --accept-sgt-current-at-splunk-com
+      SPLUNK_PASSWORD: ${SPLUNK_PASSWORD}
+      SPLUNK_HEC_TOKEN: ${SPLUNK_HEC_TOKEN}
+      SPLUNK_HEC_SSL: "false"
+    ports:
+      - "8000:8000"     # Splunk Web UI
+      - "8088:8088"     # HTTP Event Collector (HEC)
+      - "9997:9997"     # Forwarder-to-indexer receiving port
+      - "6514:514/udp"  # Syslog input (OPNsense, DSM, Suricata, etc.) —
+                        # 514/udp is already bound by the Alloy (telemetry) container
+    volumes:
+      # Bind-mounted to the NAS's /volume1/docker share (visible locally
+      # at /mnt/synology/docker) rather than named Docker volumes, so
+      # config and indexed data live in the same host-visible location
+      # as the rest of the docker stacks.
+      - /volume1/docker/splunk/etc:/opt/splunk/etc
+      - /volume1/docker/splunk/var:/opt/splunk/var
+    # Explicit memory ceiling so a single-instance homelab deploy can't
+    # crowd out DSM + the always-on Grafana/Loki/Prometheus/Alloy stack
+    # on a 6GB NAS. Adjust after checking Resource Monitor for actual
+    # headroom with Wazuh's indexer stopped.
+    mem_limit: 3g
+    mem_reservation: 1g
+    # cpus (hard CPU quota) is unsupported on this DSM kernel — CFS
+    # bandwidth control isn't compiled in. cpu_shares is a relative
+    # weight instead of a hard cap (no effect unless CPU is contended):
+    # 512 is half the default 1024, deprioritizing Splunk below the
+    # always-on observability stack since it's the secondary/comparison
+    # system here, not primary detection.
+    cpu_shares: 512
