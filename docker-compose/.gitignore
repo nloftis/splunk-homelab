@@ -1,0 +1,17 @@
+# Secrets / local environment
+.env
+.env.*
+!.env.example
+
+# Local editor/OS files
+.vscode/
+.idea/
+.DS_Store
+*~
+*.swp
+
+# Local runtime/log artifacts
+*.log
+
+# Backup files
+*.bak
