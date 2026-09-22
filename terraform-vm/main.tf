@@ -31,10 +31,12 @@ resource "libvirt_cloudinit_disk" "commoninit" {
   pool = var.libvirt_pool_name
 
   user_data = templatefile("${path.module}/cloud-init/user-data.yaml.tftpl", {
-    hostname       = var.vm_hostname
-    timezone       = var.timezone
-    admin_username = var.admin_username
-    ssh_public_key = var.ssh_public_key
+    hostname              = var.vm_hostname
+    timezone              = var.timezone
+    admin_username        = var.admin_username
+    ssh_public_key        = var.ssh_public_key
+    admin_password_hash   = var.admin_password_hash
+    splunk_install_script = file("${path.module}/scripts/install-splunk.sh")
   })
 
   meta_data = templatefile("${path.module}/cloud-init/meta-data.yaml.tftpl", {

@@ -24,10 +24,13 @@ libvirt / KVM
     +-- qcow2 COW VM disk
     |
     +-- cloud-init configuration
-    |     +-- user account
+    |     +-- administrative user
     |     +-- SSH public key
+    |     +-- console password
     |     +-- network configuration
     |     +-- qemu-guest-agent
+    |     +-- provisioning script
+    |           +-- scripts/install-splunk.sh
     |
     +-- Splunk VM
           +-- 4 vCPU
@@ -89,12 +92,19 @@ The configuration provides:
 - VM hostname and instance metadata
 - administrative user creation
 - SSH public-key configuration
+- local console password configuration
 - DHCP network configuration
 - required base packages
 - qemu guest agent configuration
+- execution of the external provisioning script
 
-This eliminates the need for a manual Ubuntu installation or initial
-console configuration.
+The provisioning script is maintained separately under `scripts/` and is
+injected into the guest by Terraform through the cloud-init template. This
+keeps application provisioning logic separate from the cloud-init YAML while
+avoiding any dependency on SSH connectivity from the KVM host.
+
+This eliminates the need for a manual Ubuntu installation or initial guest
+configuration.
 
 ### Networking
 
@@ -189,10 +199,12 @@ terraform-vm/
 ├── providers.tf
 ├── terraform.tfvars.example
 ├── variables.tf
-└── cloud-init/
-    ├── meta-data.yaml.tftpl
-    ├── network-config.yaml.tftpl
-    └── user-data.yaml.tftpl
+├── cloud-init/
+│   ├── meta-data.yaml.tftpl
+│   ├── network-config.yaml.tftpl
+│   └── user-data.yaml.tftpl
+└── scripts/
+    └── install-splunk.sh
 ```
 
 `providers.tf` defines the Terraform and provider requirements and configures
@@ -211,6 +223,11 @@ containing environment-specific values.
 
 The files under `cloud-init/` define the initial Ubuntu guest configuration.
 
+`scripts/install-splunk.sh` contains the application provisioning logic that
+cloud-init writes into the guest and executes during first boot. During the
+initial provisioning-framework validation, this script was verified to run
+successfully through cloud-init without SSH access from the KVM host.
+
 ## Configuration
 
 Create a local Terraform variables file from the supplied example:
@@ -227,6 +244,131 @@ public-key file. For example:
 ```bash
 cat ~/.ssh/id_ed25519.pub
 ```
+
+### Console Password Configuration
+
+The console password is supplied as a SHA-512 password hash through the
+sensitive Terraform variable `admin_password_hash`. This password exists for
+local console authentication; it does not enable password authentication over
+SSH.
+
+Generate a suitable SHA-512 password hash locally:
+
+```bash
+openssl passwd -6
+```
+
+Enter the desired console password when prompted. Store the resulting `$6$...`
+hash in the local `terraform.tfvars` file:
+
+```hcl
+admin_password_hash = "$6$..."
+```
+
+Do not store the plaintext password in Terraform source files.
+
+The password hash follows this configuration path:
+
+```text
+terraform.tfvars
+    |
+    | admin_password_hash
+    v
+variables.tf
+    |
+    | sensitive Terraform variable
+    v
+main.tf
+    |
+    | templatefile(...)
+    v
+cloud-init/user-data.yaml.tftpl
+    |
+    | passwd: '${admin_password_hash}'
+    | lock_passwd: false
+    v
+Ubuntu splunkadmin account
+```
+
+`variables.tf` declares the value as a sensitive Terraform variable:
+
+```hcl
+variable "admin_password_hash" {
+  description = "SHA-512 password hash for console login"
+  type        = string
+  sensitive   = true
+}
+```
+
+`main.tf` passes the Terraform variable into the cloud-init user-data template:
+
+```hcl
+user_data = templatefile("${path.module}/cloud-init/user-data.yaml.tftpl", {
+  hostname              = var.vm_hostname
+  timezone              = var.timezone
+  admin_username        = var.admin_username
+  ssh_public_key        = var.ssh_public_key
+  admin_password_hash   = var.admin_password_hash
+  splunk_install_script = file("${path.module}/scripts/install-splunk.sh")
+})
+```
+
+The cloud-init template applies the hash to the administrative account:
+
+```yaml
+users:
+  - name: ${admin_username}
+    groups: [sudo]
+    shell: /bin/bash
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    lock_passwd: false
+    passwd: '${admin_password_hash}'
+    ssh_authorized_keys:
+      - ${ssh_public_key}
+
+ssh_pwauth: false
+disable_root: true
+```
+
+`lock_passwd: false` allows the configured password to be used for local
+console authentication. `ssh_pwauth: false` separately keeps SSH password
+authentication disabled, so SSH continues to require the configured public
+key.
+
+### Provisioning Script Flow
+
+Application provisioning follows a similar source-controlled path and does
+not require Terraform to establish an SSH connection to the guest:
+
+```text
+scripts/install-splunk.sh
+        |
+        | file(...)
+        v
+main.tf
+        |
+        | templatefile(...)
+        v
+cloud-init/user-data.yaml.tftpl
+        |
+        | write_files
+        v
+/usr/local/sbin/install-splunk.sh
+        |
+        | runcmd
+        v
+executed as root during first boot
+```
+
+`main.tf` reads `scripts/install-splunk.sh` with `file()` and supplies its
+contents to the cloud-init template as `splunk_install_script`. The template
+writes the script into the guest at `/usr/local/sbin/install-splunk.sh` with
+root ownership and executable permissions. The cloud-init `runcmd` section
+then executes the script during initial provisioning.
+
+This design is particularly important with the current macvtap network
+architecture: provisioning occurs entirely inside the guest during first boot
+and therefore does not depend on direct SSH connectivity from the KVM host.
 
 `terraform.tfvars` is intentionally excluded from Git.
 
@@ -308,17 +450,41 @@ The guest administrative account is:
 splunkadmin
 ```
 
-Authentication uses the SSH public key supplied through
-`terraform.tfvars`.
+The account supports two deliberately separate authentication paths:
 
-Password-based SSH authentication and root SSH access are disabled.
+| Access path | Authentication | Status |
+|---|---|---|
+| libvirt serial console | Password | Enabled |
+| SSH | Public key | Enabled |
+| SSH | Password | Disabled |
+| Root SSH | — | Disabled |
+
+The SSH public key and the hashed local console password are supplied through
+`terraform.tfvars`. Password-based SSH authentication remains disabled with
+`ssh_pwauth: false`; enabling a password for local console authentication does
+not enable password authentication over SSH.
 
 Because the VM uses macvtap networking, the SSH connection hint assumes
 the connection originates from a network host that can communicate with
 the guest. Direct SSH access from the KVM host through the macvtap parent
 interface is not available.
 
-The libvirt console remains available for local console access when needed.
+For administrative or recovery access from the KVM host, connect to the
+libvirt serial console:
+
+```bash
+virsh console splunk
+```
+
+Press Enter if necessary to display the login prompt, then log in as
+`splunkadmin` using the plaintext password corresponding to the configured
+`admin_password_hash`.
+
+To disconnect from `virsh console`, use the virsh escape sequence:
+
+```text
+Ctrl + ]
+```
 
 ## Destroying and Recreating the VM
 
@@ -350,10 +516,16 @@ machine and supporting libvirt resources, including:
 - storage
 - networking
 - cloud-init configuration
-- SSH access
+- SSH public-key configuration
+- password-authenticated local console access
 - qemu guest agent
+- external first-boot provisioning script execution
 
-Splunk Enterprise provisioning has not yet been added.
+The cloud-init provisioning path has been validated on a clean deployment.
+`cloud-init status --long` completed with `status: done`, `extended_status: done`,
+and no reported errors, and the external provisioning script executed
+successfully as root.
 
-The next phase will extend the infrastructure-as-code deployment to install
-and configure Splunk Enterprise automatically.
+Splunk Enterprise itself has not yet been installed by the provisioning script.
+The next phase will replace the provisioning test with the actual Splunk
+Enterprise installation and configuration logic.

@@ -63,3 +63,9 @@ variable "timezone" {
   type        = string
   default     = "Pacific/Honolulu"
 }
+
+variable "admin_password_hash" {
+  description = "SHA-512 password hash for console login"
+  type        = string
+  sensitive   = true
+}
