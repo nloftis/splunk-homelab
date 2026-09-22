@@ -1,11 +1,10 @@
 services:
   splunk:
-    image: splunk/splunk:10.4.3
+    image: splunk/splunk:9.3.13
     container_name: splunk
     hostname: splunk
     environment:
       SPLUNK_START_ARGS: --accept-license
-      SPLUNK_GENERAL_TERMS: --accept-sgt-current-at-splunk-com
       SPLUNK_PASSWORD: ${SPLUNK_PASSWORD}
       SPLUNK_HEC_TOKEN: ${SPLUNK_HEC_TOKEN}
       SPLUNK_HEC_SSL: "false"
