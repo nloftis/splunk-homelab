@@ -223,10 +223,13 @@ containing environment-specific values.
 
 The files under `cloud-init/` define the initial Ubuntu guest configuration.
 
-`scripts/install-splunk.sh` contains the application provisioning logic that
-cloud-init writes into the guest and executes during first boot. During the
-initial provisioning-framework validation, this script was verified to run
-successfully through cloud-init without SSH access from the KVM host.
+`scripts/install-splunk.sh` contains the Splunk Enterprise provisioning logic
+that cloud-init writes into the guest and executes during first boot. The
+script installs Splunk Enterprise 10.4.3, performs the first start as the
+package-created `splunk` service account, generates the initial `admin`
+password, stops Splunk, enables the systemd-managed `Splunkd.service`, and
+starts Splunk again through systemd. This path has been validated on a clean
+deployment without SSH access from the KVM host.
 
 ## Configuration
 
@@ -370,6 +373,79 @@ This design is particularly important with the current macvtap network
 architecture: provisioning occurs entirely inside the guest during first boot
 and therefore does not depend on direct SSH connectivity from the KVM host.
 
+### Splunk Enterprise Provisioning
+
+The provisioning script installs Splunk Enterprise 10.4.3 from the official
+Linux AMD64 Debian package and uses `/opt/splunk` as `SPLUNK_HOME`. The package
+creates the dedicated `splunk` account and owns the Splunk installation as
+`splunk:splunk`.
+
+The validated first-boot sequence is:
+
+```text
+install Splunk package as root
+        |
+        v
+first Splunk start as splunk
+        |
+        +-- accept license noninteractively
+        +-- generate and print initial admin password
+        |
+        v
+stop Splunk as splunk
+        |
+        v
+enable systemd boot-start as root
+        |
+        v
+start Splunkd.service through systemd
+```
+
+The stop between first start and `enable boot-start` is required: Splunk
+refuses to enable or disable boot-start while `splunkd` is running. Performing
+the first start as the `splunk` account also avoids running Splunk Enterprise
+as root.
+
+The initial Splunk Web account is:
+
+```text
+username: admin
+password: randomly generated during first boot
+```
+
+The generated password is printed by Splunk during provisioning and is
+therefore captured in `/var/log/cloud-init-output.log`. If the original console
+output is no longer visible, retrieve it inside the guest with:
+
+```bash
+sudo grep -A1 "Randomly generated admin password" /var/log/cloud-init-output.log
+```
+
+Store the recovered password in an appropriate password manager. Be aware that
+the generated credential remains present in the cloud-init output log unless
+that log is subsequently handled separately.
+
+### Splunk Web Access
+
+Splunk Web listens on TCP port 8000. The validated deployment listens on all
+IPv4 interfaces and can be checked inside the guest with:
+
+```bash
+sudo ss -lntp | grep ':8000'
+```
+
+With macvtap networking, the Pop!_OS KVM host cannot open Splunk Web directly
+through the guest's macvtap address. This is the same host-to-guest isolation
+described in the networking section above; it is not a Splunk Web failure.
+
+Access Splunk Web from another permitted network system or VM instead:
+
+```text
+http://<vm-ip>:8000
+```
+
+Access from another VM on the KVM host has been validated successfully.
+
 `terraform.tfvars` is intentionally excluded from Git.
 
 Other local Terraform data such as state files and the `.terraform/`
@@ -418,6 +494,55 @@ terraform apply
 
 Terraform provisions the Ubuntu base image, VM disk, cloud-init
 configuration, generated MAC address, and libvirt domain.
+
+### Verify First-Boot Provisioning
+
+Terraform can finish creating the virtual machine before cloud-init has
+finished provisioning the guest. Connect to the VM console:
+
+```bash
+virsh console splunk
+```
+
+Then check cloud-init status:
+
+```bash
+cloud-init status --long
+```
+
+A successful deployment should report:
+
+```text
+status: done
+extended_status: done
+errors: []
+recoverable_errors: {}
+```
+
+If provisioning is still running, or if cloud-init reports an error, monitor
+the provisioning output with:
+
+```bash
+sudo tail -f /var/log/cloud-init-output.log
+```
+
+Splunk generates the initial `admin` password during its first startup. The
+password is captured in the same cloud-init output log. Retrieve it with:
+
+```bash
+sudo grep -A1 "Randomly generated admin password" /var/log/cloud-init-output.log
+```
+
+The Splunk Web credentials are therefore:
+
+```text
+username: admin
+password: <randomly generated password from cloud-init-output.log>
+```
+
+Save the generated password in an appropriate password manager. Because the
+password remains in `/var/log/cloud-init-output.log`, treat that log as
+sensitive.
 
 ## Outputs
 
@@ -510,22 +635,28 @@ terraform apply
 
 ## Current Status
 
-The Terraform configuration currently provisions the base Ubuntu virtual
-machine and supporting libvirt resources, including:
+The Terraform configuration now provisions the complete Ubuntu/Splunk virtual
+machine baseline, including:
 
-- storage
-- networking
-- cloud-init configuration
+- Ubuntu 24.04 LTS VM storage and macvtap networking
+- cloud-init guest configuration
 - SSH public-key configuration
 - password-authenticated local console access
 - qemu guest agent
-- external first-boot provisioning script execution
+- automated Splunk Enterprise 10.4.3 package installation
+- noninteractive first-run initialization
+- randomly generated initial Splunk `admin` password
+- dedicated `splunk` service account execution
+- systemd-managed `Splunkd.service`
+- automatic Splunk startup after reboot
 
-The cloud-init provisioning path has been validated on a clean deployment.
+The complete path has been validated on a clean deployment.
 `cloud-init status --long` completed with `status: done`, `extended_status: done`,
-and no reported errors, and the external provisioning script executed
-successfully as root.
+and no reported errors. `Splunkd.service` was confirmed `enabled` and `active`,
+and the main `splunkd` process was confirmed to run as the `splunk` account.
 
-Splunk Enterprise itself has not yet been installed by the provisioning script.
-The next phase will replace the provisioning test with the actual Splunk
-Enterprise installation and configuration logic.
+A VM reboot was also tested. `Splunkd.service` started automatically after the
+reboot and remained enabled and active. Splunk Web was confirmed listening on
+`0.0.0.0:8000`, and a successful `admin` login was validated from another VM.
+Direct browser access from the Pop!_OS KVM host remains unavailable because of
+the intentional macvtap host-to-guest isolation described above.
